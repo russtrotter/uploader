@@ -34,9 +34,6 @@ class DataWriter {
     }
 }
 
-//const hackCRC = 0xec4ac3d0;
-const hackCRC = 0x0;
-
 function extraZip64(length, lfhOffset) {
     let sz = 16;
     let foo = 2 + 2 + sz;
@@ -87,7 +84,7 @@ function centralDir(entry) {
     dv.setUint16(6, 20, true);
     dv.setUint16(8, 8, true);
     dv.setUint32(12, 0, true);
-    dv.setUint32(16, hackCRC, true);
+    dv.setUint32(16, 0x0, true);
     dv.setUint32(20, 0xffffffff, true);
     dv.setUint32(24, 0xffffffff, true);
     dv.setUint16(28, entry.name.byteLength, true);
@@ -165,9 +162,8 @@ function eocd() {
     return buf;
 }
 
-function lfhHeader(entry) {
-    /*
-            0	4	Local file header signature = 0x04034b50 (PK♥♦ or "PK\3\4")
+ /*
+    0	4	Local file header signature = 0x04034b50 (PK♥♦ or "PK\3\4")
     4	2	Version needed to extract (minimum)
     6	2	General purpose bit flag
     8	2	Compression method; e.g. none = 0, DEFLATE = 8 (or "\0x08\0x00")
@@ -180,11 +176,10 @@ function lfhHeader(entry) {
     28	2	Extra field length (m)
     30	n	File name
     30+n	m	Extra field
-            */
-
+*/
+function lfhHeader(entry) {
     const buf = new ArrayBuffer(30);
     const dataView = new DataView(buf);
-    
     const extraBuf = extraZip64(entry.size);
 
     dataView.setUint32(0, 0x4034b50, true);
@@ -192,7 +187,7 @@ function lfhHeader(entry) {
     dataView.setUint16(6, 0x8, true);
     dataView.setUint16(8, 0, true);
     dataView.setUint32(10, 0, true);
-    dataView.setUint32(14, hackCRC, true);
+    dataView.setUint32(14, 0x0, true);
     dataView.setUint32(18, 0xffffffff, true);
     dataView.setUint32(22, 0xffffffff, true);
     dataView.setUint16(26, entry.name.byteLength, true);
@@ -214,7 +209,6 @@ window.addEventListener('load',
 
             const handle = await window.showSaveFilePicker();
             const writer = await handle.createWritable();
-            let outputOffset = 0;
             const dw = new DataWriter(writer);
             
             const chunkSize = 1024 * 1024 * 5;
@@ -231,10 +225,6 @@ window.addEventListener('load',
                 offset += e.target.result.byteLength;
                 await dw.writeBuffer(e.target.result);
 
-                //await writer.write(e.target.result);
-                //outputOffset += e.target.result.byteLength;
-
-
                 //sendProgress.value = offset;
                 if (offset < files[fileIndex].size) {
                     readSlice(offset);
@@ -248,20 +238,13 @@ window.addEventListener('load',
                         console.log('DONE READING ', (performance.now() - start) / 1000);
 
                         const eocdrStart = dw.offset;
-                        //const eocdrStart = outputOffset;
                         for (let i = 0; i < entries.length; i++) {
                             const cDir = centralDir(entries[i]);
                             await dw.writeBlob(cDir);
-                            //await writer.write(cDir);
-                            //outputOffset += cDir.size;
                         }
                         const eocdrSize = dw.offset - eocdrStart;
-                        //const eocdrSize = outputOffset - eocdrStart;
-                        //const eocdr64Offset = outputOffset;
                         const eocdr64Offset = dw.offset;
                         const eocdrHeader = eocd64(entries.length, eocdrSize, eocdrStart);
-                        //await writer.write(eocdrHeader);
-                        //outputOffset += eocdrHeader.byteLength;
                         await dw.writeBuffer(eocdrHeader);
                         await dw.writeBuffer(z64EOCDLocator(eocdr64Offset));
                         await dw.writeBuffer(eocd());
@@ -278,14 +261,11 @@ window.addEventListener('load',
                 const localHeader = lfhHeader(entry);
                 entries.push(entry);
                 entry.lfhOffset = dw.offset;
-                //entry.lfhOffset = outputOffset;
-                //await writer.write(localHeader);
-                //outputOffset += localHeader.size;
                 await dw.writeBlob(localHeader);
             };
             startFile();
             readSlice(0);
             return false;
         });
-        console.log("READY BRO");
+        console.log("READY");
     });
