@@ -8,26 +8,31 @@ class Entry {
     }
 }
 
-
-class ZipStream {
+class DataWriter {
     writable;
-    position = 0;
-    constructor(w) {
-        this.writable = w;
+    offset = 0;
+    constructor(writable) {
+        this.writable = writable;
     }
-    
 
-    writeBlob(b) {
-        return new Promise((resolve, reject) => {
-            w.write(b).then(() => {
-                this.position += b.size;
-                resolve();
-            });
-        });
+    async writeBlob(b) {
+        console.log("PREBLOB", b.size, this.offset);
+        await this.writable.write(b);
+        this.offset += b.size;
+        console.log("POSTBLOB", b.size, this.offset);
+    }
+
+    async writeBuffer(b) {
+        console.log("PREBUF", b.byteLength, this.offset);
+        await this.writable.write(b);
+        this.offset += b.byteLength;
+        console.log("POSTBUF", b.byteLength, this.offset);
+    }
+
+    async close() {
+        await this.writable.close();
     }
 }
-
-
 
 //const hackCRC = 0xec4ac3d0;
 const hackCRC = 0x0;
@@ -73,9 +78,8 @@ function extraZip64(length, lfhOffset) {
 46+n	m	Extra field
 46+n+m	k	File comment
 */
-function centralDir(file) {
-    const nameBuf = new TextEncoder('utf-8').encode(file.name);
-    const extraBuf = extraZip64(file.size, 0);
+function centralDir(entry) {
+    const extraBuf = extraZip64(entry.size, entry.lfhOffset);
     const buf = new ArrayBuffer(46);
     const dv = new DataView(buf);
     dv.setUint32(0, 0x02014b50, true);
@@ -86,7 +90,7 @@ function centralDir(file) {
     dv.setUint32(16, hackCRC, true);
     dv.setUint32(20, 0xffffffff, true);
     dv.setUint32(24, 0xffffffff, true);
-    dv.setUint16(28, nameBuf.byteLength, true);
+    dv.setUint16(28, entry.name.byteLength, true);
     dv.setUint16(30, extraBuf.byteLength, true);
     dv.setUint16(32, 0, true);
     dv.setUint16(34, 0, true);
@@ -94,7 +98,7 @@ function centralDir(file) {
     dv.setUint32(38, 0, true);
     dv.setUint32(42, 0xffffffff, true);
 
-    return new Blob([buf, nameBuf, extraBuf]);
+    return new Blob([buf, entry.name, extraBuf]);
 }
 
 /*
@@ -161,7 +165,7 @@ function eocd() {
     return buf;
 }
 
-function lfhHeader(file) {
+function lfhHeader(entry) {
     /*
             0	4	Local file header signature = 0x04034b50 (PK♥♦ or "PK\3\4")
     4	2	Version needed to extract (minimum)
@@ -180,8 +184,8 @@ function lfhHeader(file) {
 
     const buf = new ArrayBuffer(30);
     const dataView = new DataView(buf);
-    const nameBuf = new TextEncoder('utf-8').encode(file.name);
-    const extraBuf = extraZip64(file.size);
+    
+    const extraBuf = extraZip64(entry.size);
 
     dataView.setUint32(0, 0x4034b50, true);
     dataView.setUint16(4, 20, true);
@@ -191,9 +195,9 @@ function lfhHeader(file) {
     dataView.setUint32(14, hackCRC, true);
     dataView.setUint32(18, 0xffffffff, true);
     dataView.setUint32(22, 0xffffffff, true);
-    dataView.setUint16(26, nameBuf.byteLength, true);
+    dataView.setUint16(26, entry.name.byteLength, true);
     dataView.setUint16(28, extraBuf.byteLength, true);
-    return new Blob([buf, nameBuf, extraBuf]);
+    return new Blob([buf, entry.name, extraBuf]);
 }
 
 window.addEventListener('load',
@@ -202,14 +206,16 @@ window.addEventListener('load',
         const filesInput = document.querySelector('#files');
         b.addEventListener('click', async () => {
             const files = filesInput.files;
-            console.log('YOU CLICKY');
             if (files.length === 0) {
                 console.log('No files selected');
                 return false;
             }
+            let entries = [];
 
             const handle = await window.showSaveFilePicker();
-            const writable = await handle.createWritable();
+            const writer = await handle.createWritable();
+            let outputOffset = 0;
+            const dw = new DataWriter(writer);
             
             const chunkSize = 1024 * 1024 * 5;
             const start = performance.now();
@@ -223,7 +229,12 @@ window.addEventListener('load',
             fileReader.addEventListener('load', async e => {
                 //sendChannel.send(e.target.result);
                 offset += e.target.result.byteLength;
-                await writable.write(e.target.result);
+                await dw.writeBuffer(e.target.result);
+
+                //await writer.write(e.target.result);
+                //outputOffset += e.target.result.byteLength;
+
+
                 //sendProgress.value = offset;
                 if (offset < files[fileIndex].size) {
                     readSlice(offset);
@@ -235,14 +246,26 @@ window.addEventListener('load',
                         readSlice(offset);
                     } else {
                         console.log('DONE READING ', (performance.now() - start) / 1000);
-    
-                        const cDir = centralDir(files[fileIndex]);
-                        await writable.write(cDir);
-                        const eocdrHeader = eocd64(1, cDir.size, localHeader.size + files[fileIndex].size);
-                        await writable.write(eocdrHeader);
-                        await writable.write(z64EOCDLocator(cDir.size + localHeader.size + files[fileIndex].size));
-                        await writable.write(eocd());
-                        await writable.close();
+
+                        const eocdrStart = dw.offset;
+                        //const eocdrStart = outputOffset;
+                        for (let i = 0; i < entries.length; i++) {
+                            const cDir = centralDir(entries[i]);
+                            await dw.writeBlob(cDir);
+                            //await writer.write(cDir);
+                            //outputOffset += cDir.size;
+                        }
+                        const eocdrSize = dw.offset - eocdrStart;
+                        //const eocdrSize = outputOffset - eocdrStart;
+                        //const eocdr64Offset = outputOffset;
+                        const eocdr64Offset = dw.offset;
+                        const eocdrHeader = eocd64(entries.length, eocdrSize, eocdrStart);
+                        //await writer.write(eocdrHeader);
+                        //outputOffset += eocdrHeader.byteLength;
+                        await dw.writeBuffer(eocdrHeader);
+                        await dw.writeBuffer(z64EOCDLocator(eocdr64Offset));
+                        await dw.writeBuffer(eocd());
+                        await dw.close();
                     }
                 }
             });
@@ -251,8 +274,14 @@ window.addEventListener('load',
                 fileReader.readAsArrayBuffer(slice);
             };
             const startFile = async () => {
-                const localHeader = lfhHeader(files[fileIndex]);
-                await writable.write(localHeader);
+                const entry = new Entry(files[fileIndex]);
+                const localHeader = lfhHeader(entry);
+                entries.push(entry);
+                entry.lfhOffset = dw.offset;
+                //entry.lfhOffset = outputOffset;
+                //await writer.write(localHeader);
+                //outputOffset += localHeader.size;
+                await dw.writeBlob(localHeader);
             };
             startFile();
             readSlice(0);
