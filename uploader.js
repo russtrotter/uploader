@@ -1,3 +1,159 @@
+
+let localConnection;
+let remoteConnection;
+let sendChannel;
+let receiveChannel;
+let receiveBuffer = [];
+
+async function createConnection() {
+    localConnection = new RTCPeerConnection();
+    console.log('Created local peer connection object localConnection');
+
+    sendChannel = localConnection.createDataChannel('sendDataChannel');
+    sendChannel.binaryType = 'arraybuffer';
+    console.log('Created send data channel');
+
+    sendChannel.addEventListener('open', onSendChannelStateChange);
+    sendChannel.addEventListener('close', onSendChannelStateChange);
+    sendChannel.addEventListener('error', onError);
+
+    localConnection.addEventListener('icecandidate', async event => {
+        console.log('Local ICE candidate: ', event.candidate);
+        await remoteConnection.addIceCandidate(event.candidate);
+    });
+
+    remoteConnection = new RTCPeerConnection();
+    console.log('Created remote peer connection object remoteConnection');
+
+    remoteConnection.addEventListener('icecandidate', async event => {
+        console.log('Remote ICE candidate: ', event.candidate);
+        await localConnection.addIceCandidate(event.candidate);
+    });
+    remoteConnection.addEventListener('datachannel', receiveChannelCallback);
+
+    try {
+        const offer = await localConnection.createOffer();
+        await gotLocalDescription(offer);
+    } catch (e) {
+        console.log('Failed to create session description: ', e);
+    }
+}
+
+async function onSendChannelStateChange() {
+    if (sendChannel) {
+        const { readyState } = sendChannel;
+        console.log(`Send channel state is: ${readyState}`);
+        if (readyState === 'open') {
+            //sendData();
+            //console.log('STUFF: sendData');
+            await processFiles();
+        }
+    }
+}
+
+async function gotLocalDescription(desc) {
+    await localConnection.setLocalDescription(desc);
+    console.log(`Offer from localConnection\n ${desc.sdp}`);
+    await remoteConnection.setRemoteDescription(desc);
+    try {
+        const answer = await remoteConnection.createAnswer();
+        await gotRemoteDescription(answer);
+    } catch (e) {
+        console.log('Failed to create session description: ', e);
+    }
+}
+
+async function gotRemoteDescription(desc) {
+    await remoteConnection.setLocalDescription(desc);
+    console.log(`Answer from remoteConnection\n ${desc.sdp}`);
+    await localConnection.setRemoteDescription(desc);
+}
+
+function receiveChannelCallback(event) {
+    console.log('Receive Channel Callback');
+    receiveChannel = event.channel;
+    receiveChannel.binaryType = 'arraybuffer';
+    receiveChannel.onmessage = onReceiveMessageCallback;
+    receiveChannel.onopen = onReceiveChannelStateChange;
+    receiveChannel.onclose = onReceiveChannelStateChange;
+
+    //receivedSize = 0;
+    //bitrateMax = 0;
+    //downloadAnchor.textContent = '';
+    //downloadAnchor.removeAttribute('download');
+    // if (downloadAnchor.href) {
+    //   URL.revokeObjectURL(downloadAnchor.href);
+    //   downloadAnchor.removeAttribute('href');
+    // }
+}
+
+function onReceiveMessageCallback(event) {
+    console.log(`Received Message ${event.data.byteLength}`);
+    console.log('RECV MSG', data.size);
+    //receiveBuffer.push(event.data);
+    //receivedSize += event.data.byteLength;
+
+    if (false) {
+        closeDataChannels();
+    }
+}
+
+// function onSendChannelStateChange() {
+//     if (sendChannel) {
+//         const { readyState } = sendChannel;
+//         console.log(`Send channel state is: ${readyState}`);
+//         if (readyState === 'open') {
+//             sendData();
+//         }
+//     }
+// }
+
+function onError(error) {
+    if (sendChannel) {
+        console.error('Error in sendChannel:', error);
+        return;
+    }
+    console.log('Error in sendChannel which is already closed:', error);
+}
+
+async function onReceiveChannelStateChange() {
+    if (receiveChannel) {
+        const readyState = receiveChannel.readyState;
+        console.log(`Receive channel state is: ${readyState}`);
+        if (readyState === 'open') {
+            //await displayStats();
+            console.log('RECV CHAN STATE CHG open');
+        }
+    }
+}
+
+async function displayStats() {
+    if (remoteConnection && remoteConnection.iceConnectionState === 'connected') {
+        const stats = await remoteConnection.getStats();
+        let activeCandidatePair;
+        stats.forEach(report => {
+            if (report.type === 'transport') {
+                activeCandidatePair = stats.get(report.selectedCandidatePairId);
+            }
+        });
+        if (activeCandidatePair) {
+            if (timestampPrev === activeCandidatePair.timestamp) {
+                return;
+            }
+            // calculate current bitrate
+            const bytesNow = activeCandidatePair.bytesReceived;
+            const bitrate = Math.round((bytesNow - bytesPrev) * 8 /
+                (activeCandidatePair.timestamp - timestampPrev));
+            bitrateDiv.innerHTML = `<strong>Current Bitrate:</strong> ${bitrate} kbits/sec`;
+            timestampPrev = activeCandidatePair.timestamp;
+            bytesPrev = bytesNow;
+            if (bitrate > bitrateMax) {
+                bitrateMax = bitrate;
+            }
+        }
+    }
+}
+
 class Entry {
     name;
     size;
@@ -8,9 +164,26 @@ class Entry {
     }
 }
 
+class ChannelWriter {
+    offset = 0;
+    channel;
+
+    writeBuffer(b) {
+        let len = 0;
+        if (b instanceof Array) {
+            for (let i = 0; i < b.length; i++) {
+                len += b.byteLength;
+            }
+        } else {
+            len = b.byteLength;
+        }
+    }
+}
+
 class DataWriter {
     writable;
     offset = 0;
+
     constructor(writable) {
         this.writable = writable;
     }
@@ -95,7 +268,7 @@ function centralDir(entry) {
     dv.setUint32(38, 0, true);
     dv.setUint32(42, 0xffffffff, true);
 
-    return new Blob([buf, entry.name, extraBuf]);
+    return [buf, entry.name, extraBuf];
 }
 
 /*
@@ -162,20 +335,20 @@ function eocd() {
     return buf;
 }
 
- /*
-    0	4	Local file header signature = 0x04034b50 (PK♥♦ or "PK\3\4")
-    4	2	Version needed to extract (minimum)
-    6	2	General purpose bit flag
-    8	2	Compression method; e.g. none = 0, DEFLATE = 8 (or "\0x08\0x00")
-    10	2	File last modification time
-    12	2	File last modification date
-    14	4	CRC-32 of uncompressed data
-    18	4	Compressed size (or 0xffffffff for ZIP64)
-    22	4	Uncompressed size (or 0xffffffff for ZIP64)
-    26	2	File name length (n)
-    28	2	Extra field length (m)
-    30	n	File name
-    30+n	m	Extra field
+/*
+   0	4	Local file header signature = 0x04034b50 (PK♥♦ or "PK\3\4")
+   4	2	Version needed to extract (minimum)
+   6	2	General purpose bit flag
+   8	2	Compression method; e.g. none = 0, DEFLATE = 8 (or "\0x08\0x00")
+   10	2	File last modification time
+   12	2	File last modification date
+   14	4	CRC-32 of uncompressed data
+   18	4	Compressed size (or 0xffffffff for ZIP64)
+   22	4	Uncompressed size (or 0xffffffff for ZIP64)
+   26	2	File name length (n)
+   28	2	Extra field length (m)
+   30	n	File name
+   30+n	m	Extra field
 */
 function lfhHeader(entry) {
     const buf = new ArrayBuffer(30);
@@ -192,7 +365,69 @@ function lfhHeader(entry) {
     dataView.setUint32(22, 0xffffffff, true);
     dataView.setUint16(26, entry.name.byteLength, true);
     dataView.setUint16(28, extraBuf.byteLength, true);
-    return new Blob([buf, entry.name, extraBuf]);
+    return [buf, entry.name, extraBuf];
+}
+
+let writer;
+let files;
+
+async function processFiles() {
+    const dw = new DataWriter(writer);
+    let entries = [];
+    const chunkSize = 1024 * 1024 * 5;
+    const start = performance.now();
+
+    let fileReader = new FileReader();
+    let fileIndex = 0;
+
+    let offset = 0;
+    fileReader.addEventListener('error', error => console.log('Error reading file:', error));
+    fileReader.addEventListener('abort', event => console.log('File reading aborted:', event));
+    fileReader.addEventListener('load', async e => {
+        //sendChannel.send(e.target.result);
+        offset += e.target.result.byteLength;
+        await dw.writeBuffer(e.target.result);
+
+        //sendProgress.value = offset;
+        if (offset < files[fileIndex].size) {
+            readSlice(offset);
+        } else {
+            fileIndex += 1;
+            if (fileIndex < files.length) {
+                offset = 0;
+                startFile();
+                readSlice(offset);
+            } else {
+                console.log('DONE READING ', (performance.now() - start) / 1000);
+
+                const eocdrStart = dw.offset;
+                for (let i = 0; i < entries.length; i++) {
+                    const cDir = centralDir(entries[i]);
+                    await dw.writeBuffer(cDir);
+                }
+                const eocdrSize = dw.offset - eocdrStart;
+                const eocdr64Offset = dw.offset;
+                const eocdrHeader = eocd64(entries.length, eocdrSize, eocdrStart);
+                await dw.writeBuffer(eocdrHeader);
+                await dw.writeBuffer(z64EOCDLocator(eocdr64Offset));
+                await dw.writeBuffer(eocd());
+                await dw.close();
+            }
+        }
+    });
+    const readSlice = o => {
+        const slice = files[fileIndex].slice(offset, o + chunkSize);
+        fileReader.readAsArrayBuffer(slice);
+    };
+    const startFile = async () => {
+        const entry = new Entry(files[fileIndex]);
+        const localHeader = lfhHeader(entry);
+        entries.push(entry);
+        entry.lfhOffset = dw.offset;
+        await dw.writeBuffer(localHeader);
+    };
+    startFile();
+    readSlice(0);
 }
 
 window.addEventListener('load',
@@ -200,71 +435,16 @@ window.addEventListener('load',
         var b = document.querySelector('#upload');
         const filesInput = document.querySelector('#files');
         b.addEventListener('click', async () => {
-            const files = filesInput.files;
+            files = filesInput.files;
             if (files.length === 0) {
                 console.log('No files selected');
                 return false;
             }
-            let entries = [];
-
+            
             const handle = await window.showSaveFilePicker();
-            const writer = await handle.createWritable();
-            const dw = new DataWriter(writer);
+            writer = await handle.createWritable();
             
-            const chunkSize = 1024 * 1024 * 5;
-            const start = performance.now();
-            
-            let fileReader = new FileReader();
-            let fileIndex = 0;
-            
-            let offset = 0;
-            fileReader.addEventListener('error', error => console.log('Error reading file:', error));
-            fileReader.addEventListener('abort', event => console.log('File reading aborted:', event));
-            fileReader.addEventListener('load', async e => {
-                //sendChannel.send(e.target.result);
-                offset += e.target.result.byteLength;
-                await dw.writeBuffer(e.target.result);
-
-                //sendProgress.value = offset;
-                if (offset < files[fileIndex].size) {
-                    readSlice(offset);
-                } else {
-                    fileIndex += 1;
-                    if (fileIndex < files.length) {
-                        offset = 0;
-                        startFile();
-                        readSlice(offset);
-                    } else {
-                        console.log('DONE READING ', (performance.now() - start) / 1000);
-
-                        const eocdrStart = dw.offset;
-                        for (let i = 0; i < entries.length; i++) {
-                            const cDir = centralDir(entries[i]);
-                            await dw.writeBlob(cDir);
-                        }
-                        const eocdrSize = dw.offset - eocdrStart;
-                        const eocdr64Offset = dw.offset;
-                        const eocdrHeader = eocd64(entries.length, eocdrSize, eocdrStart);
-                        await dw.writeBuffer(eocdrHeader);
-                        await dw.writeBuffer(z64EOCDLocator(eocdr64Offset));
-                        await dw.writeBuffer(eocd());
-                        await dw.close();
-                    }
-                }
-            });
-            const readSlice = o => {
-                const slice = files[fileIndex].slice(offset, o + chunkSize);
-                fileReader.readAsArrayBuffer(slice);
-            };
-            const startFile = async () => {
-                const entry = new Entry(files[fileIndex]);
-                const localHeader = lfhHeader(entry);
-                entries.push(entry);
-                entry.lfhOffset = dw.offset;
-                await dw.writeBlob(localHeader);
-            };
-            startFile();
-            readSlice(0);
+            await createConnection();
             return false;
         });
         console.log("READY");
