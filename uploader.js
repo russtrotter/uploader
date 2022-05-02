@@ -5,6 +5,18 @@ let sendChannel;
 let receiveChannel;
 let receiveBuffer = [];
 
+let writer;
+let files;
+
+let channelWriter;
+let inputFileReader;
+let inputFileOffset = 0;
+let inputFileIndex = 0;
+let zipEntries = [];
+const INPUT_FILE_BUF_SIZE = 1024 * 1024 * 5;
+const SEND_CHANNEL_BUFFER_THRESHOLD = 1024 * 1024;
+
+
 // "offer from ... " negotation says max packet size is 262144 ?
 
 
@@ -14,15 +26,21 @@ async function createConnection() {
 
     sendChannel = localConnection.createDataChannel('sendDataChannel');
     sendChannel.binaryType = 'arraybuffer';
-    sendChannel.bufferedAmountLowThreshold = 1024 * 1024;
+    sendChannel.bufferedAmountLowThreshold = (SEND_CHANNEL_BUFFER_THRESHOLD / 2);
     console.log('Created send data channel');
 
     sendChannel.addEventListener('open', onSendChannelStateChange);
     sendChannel.addEventListener('close', onSendChannelStateChange);
     sendChannel.addEventListener('error', onError);
-    sendChannel.addEventListener('bufferedamountlow', evt => {
-        console.log("YO BRO BUF AMT LOW", evt);
-    });
+    // sendChannel.addEventListener('bufferedamountlow', evt => {
+    //     console.log("YO BRO BUF AMT LOW", evt);
+    //     let a = outputQueue.unshift();
+    //     if (a !== undefined) {
+    //         console.log('POP QUEUE', a.byteLength);
+    //         sendChannel.send(a);
+    //     }
+    // });
+    channelWriter = new ChannelWriter(sendChannel);
 
     localConnection.addEventListener('icecandidate', async event => {
         console.log('Local ICE candidate: ', event.candidate);
@@ -120,6 +138,7 @@ function closeDataChannels() {
     sendChannel.close();
     console.log(`Closed data channel with label: ${sendChannel.label}`);
     sendChannel = null;
+    channelWriter = null;
     if (receiveChannel) {
       receiveChannel.close();
       console.log(`Closed data channel with label: ${receiveChannel.label}`);
@@ -204,17 +223,73 @@ class Entry {
     }
 }
 
+
 class ChannelWriter {
     offset = 0;
     channel;
     chunkSize = 16384;
+    queue;
 
-    constructor(channel) {
-        this.channel = channel;
+    constructor(dc, lowWaterMark = 262144, highWaterMark = 1048576) {
+        this.channel = dc;
+        this.paused = false;
+        this.ready = Promise.resolve();
+        this.highWaterMark = highWaterMark;
+
+        // Drain once ready
+        this.channel.bufferedAmountLowThreshold = lowWaterMark;
+        this.channel.onbufferedamountlow = () => {
+            // Continue once low water mark has been reached
+            if (this.paused) {
+                console.log(`Data channel ${this.channel.label} resumed @ ${this.channel.bufferedAmount}`);
+                this.paused = false;
+                this.resolve();
+            }
+        };
+        this.queue = this.ready;
     }
 
+    stuff(message) {
+        // Throw if paused
+        if (this.paused) {
+            throw new Error('Unable to write, data channel is paused!');
+        }
+
+        // Try sending
+        // Note: Technically we should be able to catch a TypeError in case the
+        //       underlying buffer is full. However, there are other reasons
+        //       that can result in a TypeError and no browser has implemented
+        //       this properly so far. Thus, we use a well-tested high water
+        //       mark instead and try to never fill the buffer completely.
+        this.channel.send(message);
+
+        // Pause once high water mark has been reached
+        if (!this.paused && this.channel.bufferedAmount >= this.highWaterMark) {
+            this.paused = true;
+            this.ready = new Promise((resolve) => this.resolve = resolve);
+            console.log(`Data channel ${this.channel.label} paused @ ${this.channel.bufferedAmount}`);
+        }
+    }
+
+    // constructor(channel) {
+    //     this.channel = channel;
+    // }
+
     doSend(a) {
-        this.channel.send(a);
+        // Wait until ready, then write
+        // Note: This very simple technique allows for ordered message
+        //       queueing by using the event loop.
+        this.queue = this.queue.then(async () => {
+            await this.ready;
+            this.stuff(a);
+        });
+        // if (outputQueue.length === 0 && this.channel.bufferedAmount < SEND_CHANNEL_BUFFER_THRESHOLD) {
+        //     console.log("EMIT ", this.channel.bufferedAmount, a.byteLength);
+        //     this.channel.send(a);
+        // } else {
+        //     console.log("QUEUE q=", outputQueue.length, 'buf=',this.channel.bufferedAmount, 'len=', a.byteLength);
+        //     outputQueue.push(a);
+        // }
     }
 
     chunkArrayBuffer(a) {
@@ -438,70 +513,69 @@ function lfhHeader(entry) {
     return [buf, entry.name, extraBuf];
 }
 
-let writer;
-let files;
 
-async function processFiles() {
-    //const dw = new DataWriter(writer);
-    const dw = new ChannelWriter(sendChannel);
-    let entries = [];
-    const chunkSize = 1024 * 1024 * 5;
-    const start = performance.now();
 
-    let fileReader = new FileReader();
-    let fileIndex = 0;
 
-    let offset = 0;
-    fileReader.addEventListener('error', error => console.log('Error reading file:', error));
-    fileReader.addEventListener('abort', event => console.log('File reading aborted:', event));
-    fileReader.addEventListener('load', async e => {
-        //sendChannel.send(e.target.result);
-        offset += e.target.result.byteLength;
-        console.log('SENDCH BUF AMT ', sendChannel.bufferedAmount);
-        dw.writeBuffer(e.target.result);
+async function onFileReaderData(e) {
+    //sendChannel.send(e.target.result);
+    inputFileOffset += e.target.result.byteLength;
+    console.log('PLUGGING AWAY');
+    channelWriter.writeBuffer(e.target.result);
 
-        //sendProgress.value = offset;
-        if (offset < files[fileIndex].size) {
-            readSlice(offset);
+    //sendProgress.value = offset;
+    if (inputFileOffset < files[inputFileIndex].size) {
+        readSlice();
+    } else {
+        inputFileIndex += 1;
+        if (inputFileIndex < files.length) {
+            inputFileOffset = 0;
+            startFile();
+            readSlice();
         } else {
-            fileIndex += 1;
-            if (fileIndex < files.length) {
-                offset = 0;
-                startFile();
-                readSlice(offset);
-            } else {
-                console.log('DONE READING ', (performance.now() - start) / 1000);
+            console.log('DONE READING ');
 
-                const eocdrStart = dw.offset;
-                for (let i = 0; i < entries.length; i++) {
-                    const cDir = centralDir(entries[i]);
-                    dw.writeBuffer(cDir);
-                }
-                const eocdrSize = dw.offset - eocdrStart;
-                const eocdr64Offset = dw.offset;
-                const eocdrHeader = eocd64(entries.length, eocdrSize, eocdrStart);
-                dw.writeBuffer(eocdrHeader);
-                dw.writeBuffer(z64EOCDLocator(eocdr64Offset));
-                dw.writeBuffer(eocd());
-                //dw.close();
-                //await writer.close();
-                dw.writeBuffer(new ArrayBuffer(0));
+            const eocdrStart = channelWriter.offset;
+            for (let i = 0; i < zipEntries.length; i++) {
+                const cDir = centralDir(zipEntries[i]);
+                channelWriter.writeBuffer(cDir);
             }
+            const eocdrSize = channelWriter.offset - eocdrStart;
+            const eocdr64Offset = channelWriter.offset;
+            const eocdrHeader = eocd64(zipEntries.length, eocdrSize, eocdrStart);
+            channelWriter.writeBuffer(eocdrHeader);
+            channelWriter.writeBuffer(z64EOCDLocator(eocdr64Offset));
+            channelWriter.writeBuffer(eocd());
+            //dw.close();
+            //await writer.close();
+            channelWriter.writeBuffer(new ArrayBuffer(0));
         }
-    });
-    const readSlice = o => {
-        const slice = files[fileIndex].slice(offset, o + chunkSize);
-        fileReader.readAsArrayBuffer(slice);
-    };
-    const startFile = async () => {
-        const entry = new Entry(files[fileIndex]);
-        const localHeader = lfhHeader(entry);
-        entries.push(entry);
-        entry.lfhOffset = dw.offset;
-        dw.writeBuffer(localHeader);
-    };
+    }
+}
+
+function readSlice() {
+    const slice = files[inputFileIndex].slice(inputFileOffset, inputFileOffset + INPUT_FILE_BUF_SIZE);
+    inputFileReader.readAsArrayBuffer(slice);
+}
+
+function startFile() {
+    const entry = new Entry(files[inputFileIndex]);
+    const localHeader = lfhHeader(entry);
+    zipEntries.push(entry);
+    entry.lfhOffset = channelWriter.offset;
+    channelWriter.writeBuffer(localHeader);
+}
+
+
+async function processFiles() {    
+    inputFileIndex = 0;
+    inputFileOffset = 0;
+    inputFileReader = new FileReader();
+    inputFileReader.addEventListener('error', error => console.log('Error reading file:', error));
+    inputFileReader.addEventListener('abort', event => console.log('File reading aborted:', event));
+    inputFileReader.addEventListener('load', onFileReaderData);
+   
     startFile();
-    readSlice(0);
+    readSlice();
 }
 
 window.addEventListener('load',
@@ -509,6 +583,7 @@ window.addEventListener('load',
         var b = document.querySelector('#upload');
         const filesInput = document.querySelector('#files');
         b.addEventListener('click', async () => {
+            
             files = filesInput.files;
             if (files.length === 0) {
                 console.log('No files selected');
