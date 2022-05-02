@@ -5,17 +5,24 @@ let sendChannel;
 let receiveChannel;
 let receiveBuffer = [];
 
+// "offer from ... " negotation says max packet size is 262144 ?
+
+
 async function createConnection() {
     localConnection = new RTCPeerConnection();
     console.log('Created local peer connection object localConnection');
 
     sendChannel = localConnection.createDataChannel('sendDataChannel');
     sendChannel.binaryType = 'arraybuffer';
+    sendChannel.bufferedAmountLowThreshold = 1024 * 1024;
     console.log('Created send data channel');
 
     sendChannel.addEventListener('open', onSendChannelStateChange);
     sendChannel.addEventListener('close', onSendChannelStateChange);
     sendChannel.addEventListener('error', onError);
+    sendChannel.addEventListener('bufferedamountlow', evt => {
+        console.log("YO BRO BUF AMT LOW", evt);
+    });
 
     localConnection.addEventListener('icecandidate', async event => {
         console.log('Local ICE candidate: ', event.candidate);
@@ -76,7 +83,7 @@ function receiveChannelCallback(event) {
     receiveChannel.onmessage = onReceiveMessageCallback;
     receiveChannel.onopen = onReceiveChannelStateChange;
     receiveChannel.onclose = onReceiveChannelStateChange;
-
+    
     //receivedSize = 0;
     //bitrateMax = 0;
     //downloadAnchor.textContent = '';
@@ -87,16 +94,48 @@ function receiveChannelCallback(event) {
     // }
 }
 
-function onReceiveMessageCallback(event) {
-    console.log(`Received Message ${event.data.byteLength}`);
-    console.log('RECV MSG', data.size);
+async function onReceiveMessageCallback(event) {
+    //console.log(`FIXME Received Message ${event.data.byteLength}`);
+    const a = event.data;
+    if (a.byteLength > 0) {
+        //console.log('DATA BLOCK ', a);
+        await writer.write(a);
+    } else {
+        console.log('GOT EOD BUH BYE');
+        await writer.close();
+        closeDataChannels();
+    }
+    
+    //console.log('RECV MSG', data.size);
     //receiveBuffer.push(event.data);
     //receivedSize += event.data.byteLength;
 
-    if (false) {
-        closeDataChannels();
-    }
+    // if (false) {
+    //     closeDataChannels();
+    // }
 }
+
+function closeDataChannels() {
+    console.log('Closing data channels');
+    sendChannel.close();
+    console.log(`Closed data channel with label: ${sendChannel.label}`);
+    sendChannel = null;
+    if (receiveChannel) {
+      receiveChannel.close();
+      console.log(`Closed data channel with label: ${receiveChannel.label}`);
+      receiveChannel = null;
+    }
+    localConnection.close();
+    remoteConnection.close();
+    localConnection = null;
+    remoteConnection = null;
+    console.log('Closed peer connections');
+  
+    // re-enable the file select
+    //fileInput.disabled = false;
+    //abortButton.disabled = true;
+    //sendFileButton.disabled = false;
+  }
 
 // function onSendChannelStateChange() {
 //     if (sendChannel) {
@@ -116,7 +155,8 @@ function onError(error) {
     console.log('Error in sendChannel which is already closed:', error);
 }
 
-async function onReceiveChannelStateChange() {
+async function onReceiveChannelStateChange(evt) {
+    console.log("BRUH recv state change", evt);
     if (receiveChannel) {
         const readyState = receiveChannel.readyState;
         console.log(`Receive channel state is: ${readyState}`);
@@ -167,15 +207,45 @@ class Entry {
 class ChannelWriter {
     offset = 0;
     channel;
+    chunkSize = 16384;
+
+    constructor(channel) {
+        this.channel = channel;
+    }
+
+    doSend(a) {
+        this.channel.send(a);
+    }
+
+    chunkArrayBuffer(a) {
+        let off = 0;
+        while (off < a.byteLength) {
+            let len = Math.min(this.chunkSize, a.byteLength - off);
+            let c = a.slice(off, off + len);
+            //console.log("CHUNK SEND ", c.byteLength);
+            this.doSend(c);
+            off += len;
+        }
+    }
+
+    sendArrayBuffer(a) {
+        if (a.byteLength > this.chunkSize) {
+            this.chunkArrayBuffer(a);
+        } else {
+            //console.log("BLOCK SEND ", a.byteLength);
+            this.doSend(a);
+            
+        }
+        this.offset += a.byteLength;
+    }
 
     writeBuffer(b) {
-        let len = 0;
         if (b instanceof Array) {
             for (let i = 0; i < b.length; i++) {
-                len += b.byteLength;
+                this.sendArrayBuffer(b[i]);
             }
         } else {
-            len = b.byteLength;
+            this.sendArrayBuffer(b);
         }
     }
 }
@@ -372,7 +442,8 @@ let writer;
 let files;
 
 async function processFiles() {
-    const dw = new DataWriter(writer);
+    //const dw = new DataWriter(writer);
+    const dw = new ChannelWriter(sendChannel);
     let entries = [];
     const chunkSize = 1024 * 1024 * 5;
     const start = performance.now();
@@ -386,7 +457,8 @@ async function processFiles() {
     fileReader.addEventListener('load', async e => {
         //sendChannel.send(e.target.result);
         offset += e.target.result.byteLength;
-        await dw.writeBuffer(e.target.result);
+        console.log('SENDCH BUF AMT ', sendChannel.bufferedAmount);
+        dw.writeBuffer(e.target.result);
 
         //sendProgress.value = offset;
         if (offset < files[fileIndex].size) {
@@ -403,15 +475,17 @@ async function processFiles() {
                 const eocdrStart = dw.offset;
                 for (let i = 0; i < entries.length; i++) {
                     const cDir = centralDir(entries[i]);
-                    await dw.writeBuffer(cDir);
+                    dw.writeBuffer(cDir);
                 }
                 const eocdrSize = dw.offset - eocdrStart;
                 const eocdr64Offset = dw.offset;
                 const eocdrHeader = eocd64(entries.length, eocdrSize, eocdrStart);
-                await dw.writeBuffer(eocdrHeader);
-                await dw.writeBuffer(z64EOCDLocator(eocdr64Offset));
-                await dw.writeBuffer(eocd());
-                await dw.close();
+                dw.writeBuffer(eocdrHeader);
+                dw.writeBuffer(z64EOCDLocator(eocdr64Offset));
+                dw.writeBuffer(eocd());
+                //dw.close();
+                //await writer.close();
+                dw.writeBuffer(new ArrayBuffer(0));
             }
         }
     });
@@ -424,7 +498,7 @@ async function processFiles() {
         const localHeader = lfhHeader(entry);
         entries.push(entry);
         entry.lfhOffset = dw.offset;
-        await dw.writeBuffer(localHeader);
+        dw.writeBuffer(localHeader);
     };
     startFile();
     readSlice(0);
