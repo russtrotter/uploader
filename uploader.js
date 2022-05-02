@@ -223,17 +223,16 @@ class Entry {
     }
 }
 
-
 class ChannelWriter {
     offset = 0;
     channel;
     chunkSize = 16384;
-    queue;
+    //queue;
 
     constructor(dc, lowWaterMark = 262144, highWaterMark = 1048576) {
         this.channel = dc;
         this.paused = false;
-        this.ready = Promise.resolve();
+        //this.ready = Promise.resolve();
         this.highWaterMark = highWaterMark;
 
         // Drain once ready
@@ -241,15 +240,36 @@ class ChannelWriter {
         this.channel.onbufferedamountlow = () => {
             // Continue once low water mark has been reached
             if (this.paused) {
-                console.log(`Data channel ${this.channel.label} resumed @ ${this.channel.bufferedAmount}`);
+                console.debug(`Data channel ${this.channel.label} resumed @ ${this.channel.bufferedAmount}`);
                 this.paused = false;
                 this.resolve();
             }
         };
-        this.queue = this.ready;
+        //this.queue = this.ready;
     }
 
-    stuff(message) {
+    async stuff(a) {
+        if (this.paused) {
+            throw new Error('oh fudge, already paused');
+        }
+        return new Promise((resolve) => {
+            this.channel.send(a);
+            if (!this.paused && this.channel.bufferedAmount < this.highWaterMark) {
+                resolve();
+            } else {
+                console.debug('DC paused a=', a.byteLength, 'ba=', this.channel.bufferedAmount);
+                this.paused = true;
+                this.resolve = resolve;
+            }
+        });
+    }
+
+    async doSend(a) {
+        console.debug('DO SEND ', a.byteLength);
+        await this.stuff(a);
+    }
+
+    stuff3(message) {
         // Throw if paused
         if (this.paused) {
             throw new Error('Unable to write, data channel is paused!');
@@ -267,7 +287,7 @@ class ChannelWriter {
         if (!this.paused && this.channel.bufferedAmount >= this.highWaterMark) {
             this.paused = true;
             this.ready = new Promise((resolve) => this.resolve = resolve);
-            console.log(`Data channel ${this.channel.label} paused @ ${this.channel.bufferedAmount}`);
+            console.debug(`Data channel ${this.channel.label} paused @ ${this.channel.bufferedAmount}`);
         }
     }
 
@@ -275,14 +295,16 @@ class ChannelWriter {
     //     this.channel = channel;
     // }
 
-    doSend(a) {
+    doSend2(a) {
         // Wait until ready, then write
         // Note: This very simple technique allows for ordered message
         //       queueing by using the event loop.
+
         this.queue = this.queue.then(async () => {
             await this.ready;
             this.stuff(a);
         });
+
         // if (outputQueue.length === 0 && this.channel.bufferedAmount < SEND_CHANNEL_BUFFER_THRESHOLD) {
         //     console.log("EMIT ", this.channel.bufferedAmount, a.byteLength);
         //     this.channel.send(a);
@@ -292,38 +314,39 @@ class ChannelWriter {
         // }
     }
 
-    chunkArrayBuffer(a) {
+    async chunkArrayBuffer(a) {
         let off = 0;
         while (off < a.byteLength) {
             let len = Math.min(this.chunkSize, a.byteLength - off);
             let c = a.slice(off, off + len);
             //console.log("CHUNK SEND ", c.byteLength);
-            this.doSend(c);
+            await this.doSend(c);
             off += len;
         }
     }
 
-    sendArrayBuffer(a) {
+    async sendArrayBuffer(a) {
         if (a.byteLength > this.chunkSize) {
-            this.chunkArrayBuffer(a);
+           await this.chunkArrayBuffer(a);
         } else {
             //console.log("BLOCK SEND ", a.byteLength);
-            this.doSend(a);
+            await this.doSend(a);
             
         }
         this.offset += a.byteLength;
     }
 
-    writeBuffer(b) {
+    async writeBuffer(b) {
         if (b instanceof Array) {
             for (let i = 0; i < b.length; i++) {
-                this.sendArrayBuffer(b[i]);
+                await this.sendArrayBuffer(b[i]);
             }
         } else {
-            this.sendArrayBuffer(b);
+            await this.sendArrayBuffer(b);
         }
     }
 }
+
 
 class DataWriter {
     writable;
@@ -519,8 +542,8 @@ function lfhHeader(entry) {
 async function onFileReaderData(e) {
     //sendChannel.send(e.target.result);
     inputFileOffset += e.target.result.byteLength;
-    console.log('PLUGGING AWAY');
-    channelWriter.writeBuffer(e.target.result);
+    //console.log('PLUGGING AWAY');
+    await channelWriter.writeBuffer(e.target.result);
 
     //sendProgress.value = offset;
     if (inputFileOffset < files[inputFileIndex].size) {
@@ -529,7 +552,7 @@ async function onFileReaderData(e) {
         inputFileIndex += 1;
         if (inputFileIndex < files.length) {
             inputFileOffset = 0;
-            startFile();
+            await startFile();
             readSlice();
         } else {
             console.log('DONE READING ');
@@ -537,17 +560,17 @@ async function onFileReaderData(e) {
             const eocdrStart = channelWriter.offset;
             for (let i = 0; i < zipEntries.length; i++) {
                 const cDir = centralDir(zipEntries[i]);
-                channelWriter.writeBuffer(cDir);
+                await channelWriter.writeBuffer(cDir);
             }
             const eocdrSize = channelWriter.offset - eocdrStart;
             const eocdr64Offset = channelWriter.offset;
             const eocdrHeader = eocd64(zipEntries.length, eocdrSize, eocdrStart);
-            channelWriter.writeBuffer(eocdrHeader);
-            channelWriter.writeBuffer(z64EOCDLocator(eocdr64Offset));
-            channelWriter.writeBuffer(eocd());
+            await channelWriter.writeBuffer(eocdrHeader);
+            await channelWriter.writeBuffer(z64EOCDLocator(eocdr64Offset));
+            await channelWriter.writeBuffer(eocd());
             //dw.close();
             //await writer.close();
-            channelWriter.writeBuffer(new ArrayBuffer(0));
+            await channelWriter.writeBuffer(new ArrayBuffer(0));
         }
     }
 }
@@ -557,12 +580,12 @@ function readSlice() {
     inputFileReader.readAsArrayBuffer(slice);
 }
 
-function startFile() {
+async function startFile() {
     const entry = new Entry(files[inputFileIndex]);
     const localHeader = lfhHeader(entry);
     zipEntries.push(entry);
     entry.lfhOffset = channelWriter.offset;
-    channelWriter.writeBuffer(localHeader);
+    await channelWriter.writeBuffer(localHeader);
 }
 
 
