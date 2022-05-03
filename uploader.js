@@ -10,13 +10,15 @@ let files;
 
 let inputFileProgress;
 let inputFileOffsetProgress;
+let inputTimeProgress;
+let inputTimeStart;
 let channelWriter;
 let inputFileReader;
 let inputFileOffset = 0;
 let inputFileIndex = 0;
 let zipEntries = [];
 const INPUT_FILE_BUF_SIZE = 1024 * 1024 * 5;
-const SEND_CHANNEL_BUFFER_THRESHOLD = 1024 * 1024;
+
 
 
 // "offer from ... " negotation says max packet size is 262144 ?
@@ -28,7 +30,7 @@ async function createConnection() {
 
     sendChannel = localConnection.createDataChannel('sendDataChannel');
     sendChannel.binaryType = 'arraybuffer';
-    sendChannel.bufferedAmountLowThreshold = (SEND_CHANNEL_BUFFER_THRESHOLD / 2);
+    
     console.log('Created send data channel');
 
     sendChannel.addEventListener('open', onSendChannelStateChange);
@@ -545,6 +547,7 @@ async function onFileReaderData(e) {
     //sendChannel.send(e.target.result);
     inputFileOffset += e.target.result.byteLength;
     updateInputFileOffsetProgress();
+    updateInputTimeProgress();
     //console.log('PLUGGING AWAY');
     await channelWriter.writeBuffer(e.target.result);
 
@@ -560,6 +563,7 @@ async function onFileReaderData(e) {
             readSlice();
         } else {
             console.log('DONE READING ');
+            updateInputTimeProgress();
 
             const eocdrStart = channelWriter.offset;
             for (let i = 0; i < zipEntries.length; i++) {
@@ -601,11 +605,19 @@ function updateInputFileOffsetProgress() {
     inputFileOffsetProgress.innerHTML = `Byte ${inputFileOffset} of ${files[inputFileIndex].size}`;
 }
 
+function updateInputTimeProgress() {
+    let n = performance.now();
+    inputTimeProgress.innerHTML = `Time ${(n - inputTimeStart) / 1000} seconds`;
+}
+
+
 async function processFiles() {    
     inputFileIndex = 0;
     updateInputFileProgress();
     inputFileOffset = 0;
     updateInputFileOffsetProgress();
+    inputTimeStart = performance.now();
+    updateInputTimeProgress();
     inputFileReader = new FileReader();
     inputFileReader.addEventListener('error', error => console.log('Error reading file:', error));
     inputFileReader.addEventListener('abort', event => console.log('File reading aborted:', event));
@@ -621,6 +633,7 @@ window.addEventListener('load',
         inputFileProgress = document.querySelector('#inputFileProgress');
         inputFileOffsetProgress = document.querySelector("#inputFileOffsetProgress");
         const filesInput = document.querySelector('#files');
+        inputTimeProgress = document.querySelector('#inputTimeProgress');
         b.addEventListener('click', async () => {
             files = filesInput.files;
             if (files.length === 0) {
