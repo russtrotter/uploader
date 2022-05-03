@@ -8,6 +8,8 @@ let receiveBuffer = [];
 let writer;
 let files;
 
+let inputFileProgress;
+let inputFileOffsetProgress;
 let channelWriter;
 let inputFileReader;
 let inputFileOffset = 0;
@@ -542,6 +544,7 @@ function lfhHeader(entry) {
 async function onFileReaderData(e) {
     //sendChannel.send(e.target.result);
     inputFileOffset += e.target.result.byteLength;
+    updateInputFileOffsetProgress();
     //console.log('PLUGGING AWAY');
     await channelWriter.writeBuffer(e.target.result);
 
@@ -550,6 +553,7 @@ async function onFileReaderData(e) {
         readSlice();
     } else {
         inputFileIndex += 1;
+        updateInputFileProgress();
         if (inputFileIndex < files.length) {
             inputFileOffset = 0;
             await startFile();
@@ -589,9 +593,19 @@ async function startFile() {
 }
 
 
+function updateInputFileProgress() {
+    inputFileProgress.innerHTML = `File ${inputFileIndex} of ${files.length}`;
+}
+
+function updateInputFileOffsetProgress() {
+    inputFileOffsetProgress.innerHTML = `Byte ${inputFileOffset} of ${files[inputFileIndex].size}`;
+}
+
 async function processFiles() {    
     inputFileIndex = 0;
+    updateInputFileProgress();
     inputFileOffset = 0;
+    updateInputFileOffsetProgress();
     inputFileReader = new FileReader();
     inputFileReader.addEventListener('error', error => console.log('Error reading file:', error));
     inputFileReader.addEventListener('abort', event => console.log('File reading aborted:', event));
@@ -604,9 +618,10 @@ async function processFiles() {
 window.addEventListener('load',
     function () {
         var b = document.querySelector('#upload');
+        inputFileProgress = document.querySelector('#inputFileProgress');
+        inputFileOffsetProgress = document.querySelector("#inputFileOffsetProgress");
         const filesInput = document.querySelector('#files');
         b.addEventListener('click', async () => {
-            
             files = filesInput.files;
             if (files.length === 0) {
                 console.log('No files selected');
