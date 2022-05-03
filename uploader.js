@@ -30,20 +30,12 @@ async function createConnection() {
 
     sendChannel = localConnection.createDataChannel('sendDataChannel');
     sendChannel.binaryType = 'arraybuffer';
-    
+
     console.log('Created send data channel');
 
     sendChannel.addEventListener('open', onSendChannelStateChange);
     sendChannel.addEventListener('close', onSendChannelStateChange);
     sendChannel.addEventListener('error', onError);
-    // sendChannel.addEventListener('bufferedamountlow', evt => {
-    //     console.log("YO BRO BUF AMT LOW", evt);
-    //     let a = outputQueue.unshift();
-    //     if (a !== undefined) {
-    //         console.log('POP QUEUE', a.byteLength);
-    //         sendChannel.send(a);
-    //     }
-    // });
     channelWriter = new ChannelWriter(sendChannel);
 
     localConnection.addEventListener('icecandidate', async event => {
@@ -73,8 +65,6 @@ async function onSendChannelStateChange() {
         const { readyState } = sendChannel;
         console.log(`Send channel state is: ${readyState}`);
         if (readyState === 'open') {
-            //sendData();
-            //console.log('STUFF: sendData');
             await processFiles();
         }
     }
@@ -105,36 +95,17 @@ function receiveChannelCallback(event) {
     receiveChannel.onmessage = onReceiveMessageCallback;
     receiveChannel.onopen = onReceiveChannelStateChange;
     receiveChannel.onclose = onReceiveChannelStateChange;
-    
-    //receivedSize = 0;
-    //bitrateMax = 0;
-    //downloadAnchor.textContent = '';
-    //downloadAnchor.removeAttribute('download');
-    // if (downloadAnchor.href) {
-    //   URL.revokeObjectURL(downloadAnchor.href);
-    //   downloadAnchor.removeAttribute('href');
-    // }
 }
 
 async function onReceiveMessageCallback(event) {
-    //console.log(`FIXME Received Message ${event.data.byteLength}`);
     const a = event.data;
     if (a.byteLength > 0) {
-        //console.log('DATA BLOCK ', a);
         await writer.write(a);
     } else {
-        console.log('GOT EOD BUH BYE');
+        console.log('END OF DATA');
         await writer.close();
         closeDataChannels();
     }
-    
-    //console.log('RECV MSG', data.size);
-    //receiveBuffer.push(event.data);
-    //receivedSize += event.data.byteLength;
-
-    // if (false) {
-    //     closeDataChannels();
-    // }
 }
 
 function closeDataChannels() {
@@ -144,31 +115,16 @@ function closeDataChannels() {
     sendChannel = null;
     channelWriter = null;
     if (receiveChannel) {
-      receiveChannel.close();
-      console.log(`Closed data channel with label: ${receiveChannel.label}`);
-      receiveChannel = null;
+        receiveChannel.close();
+        console.log(`Closed data channel with label: ${receiveChannel.label}`);
+        receiveChannel = null;
     }
     localConnection.close();
     remoteConnection.close();
     localConnection = null;
     remoteConnection = null;
     console.log('Closed peer connections');
-  
-    // re-enable the file select
-    //fileInput.disabled = false;
-    //abortButton.disabled = true;
-    //sendFileButton.disabled = false;
-  }
-
-// function onSendChannelStateChange() {
-//     if (sendChannel) {
-//         const { readyState } = sendChannel;
-//         console.log(`Send channel state is: ${readyState}`);
-//         if (readyState === 'open') {
-//             sendData();
-//         }
-//     }
-// }
+}
 
 function onError(error) {
     if (sendChannel) {
@@ -179,40 +135,12 @@ function onError(error) {
 }
 
 async function onReceiveChannelStateChange(evt) {
-    console.log("BRUH recv state change", evt);
+    console.log("recv state change", evt);
     if (receiveChannel) {
         const readyState = receiveChannel.readyState;
         console.log(`Receive channel state is: ${readyState}`);
         if (readyState === 'open') {
-            //await displayStats();
             console.log('RECV CHAN STATE CHG open');
-        }
-    }
-}
-
-async function displayStats() {
-    if (remoteConnection && remoteConnection.iceConnectionState === 'connected') {
-        const stats = await remoteConnection.getStats();
-        let activeCandidatePair;
-        stats.forEach(report => {
-            if (report.type === 'transport') {
-                activeCandidatePair = stats.get(report.selectedCandidatePairId);
-            }
-        });
-        if (activeCandidatePair) {
-            if (timestampPrev === activeCandidatePair.timestamp) {
-                return;
-            }
-            // calculate current bitrate
-            const bytesNow = activeCandidatePair.bytesReceived;
-            const bitrate = Math.round((bytesNow - bytesPrev) * 8 /
-                (activeCandidatePair.timestamp - timestampPrev));
-            bitrateDiv.innerHTML = `<strong>Current Bitrate:</strong> ${bitrate} kbits/sec`;
-            timestampPrev = activeCandidatePair.timestamp;
-            bytesPrev = bytesNow;
-            if (bitrate > bitrateMax) {
-                bitrateMax = bitrate;
-            }
         }
     }
 }
@@ -230,29 +158,26 @@ class Entry {
 class ChannelWriter {
     offset = 0;
     channel;
-    chunkSize = 16384;
-    //queue;
+    chunkSize = 262144;
 
     constructor(dc, lowWaterMark = 262144, highWaterMark = 1048576) {
         this.channel = dc;
         this.paused = false;
-        //this.ready = Promise.resolve();
-        this.highWaterMark = highWaterMark;
 
-        // Drain once ready
+        this.highWaterMark = highWaterMark;
         this.channel.bufferedAmountLowThreshold = lowWaterMark;
         this.channel.onbufferedamountlow = () => {
-            // Continue once low water mark has been reached
+            // resume once low watermark is crossed
             if (this.paused) {
                 console.debug(`Data channel ${this.channel.label} resumed @ ${this.channel.bufferedAmount}`);
                 this.paused = false;
                 this.resolve();
             }
         };
-        //this.queue = this.ready;
     }
 
-    async stuff(a) {
+
+    async doSend(a) {
         if (this.paused) {
             throw new Error('oh fudge, already paused');
         }
@@ -268,62 +193,11 @@ class ChannelWriter {
         });
     }
 
-    async doSend(a) {
-        console.debug('DO SEND ', a.byteLength);
-        await this.stuff(a);
-    }
-
-    stuff3(message) {
-        // Throw if paused
-        if (this.paused) {
-            throw new Error('Unable to write, data channel is paused!');
-        }
-
-        // Try sending
-        // Note: Technically we should be able to catch a TypeError in case the
-        //       underlying buffer is full. However, there are other reasons
-        //       that can result in a TypeError and no browser has implemented
-        //       this properly so far. Thus, we use a well-tested high water
-        //       mark instead and try to never fill the buffer completely.
-        this.channel.send(message);
-
-        // Pause once high water mark has been reached
-        if (!this.paused && this.channel.bufferedAmount >= this.highWaterMark) {
-            this.paused = true;
-            this.ready = new Promise((resolve) => this.resolve = resolve);
-            console.debug(`Data channel ${this.channel.label} paused @ ${this.channel.bufferedAmount}`);
-        }
-    }
-
-    // constructor(channel) {
-    //     this.channel = channel;
-    // }
-
-    doSend2(a) {
-        // Wait until ready, then write
-        // Note: This very simple technique allows for ordered message
-        //       queueing by using the event loop.
-
-        this.queue = this.queue.then(async () => {
-            await this.ready;
-            this.stuff(a);
-        });
-
-        // if (outputQueue.length === 0 && this.channel.bufferedAmount < SEND_CHANNEL_BUFFER_THRESHOLD) {
-        //     console.log("EMIT ", this.channel.bufferedAmount, a.byteLength);
-        //     this.channel.send(a);
-        // } else {
-        //     console.log("QUEUE q=", outputQueue.length, 'buf=',this.channel.bufferedAmount, 'len=', a.byteLength);
-        //     outputQueue.push(a);
-        // }
-    }
-
     async chunkArrayBuffer(a) {
         let off = 0;
         while (off < a.byteLength) {
             let len = Math.min(this.chunkSize, a.byteLength - off);
             let c = a.slice(off, off + len);
-            //console.log("CHUNK SEND ", c.byteLength);
             await this.doSend(c);
             off += len;
         }
@@ -331,11 +205,9 @@ class ChannelWriter {
 
     async sendArrayBuffer(a) {
         if (a.byteLength > this.chunkSize) {
-           await this.chunkArrayBuffer(a);
+            await this.chunkArrayBuffer(a);
         } else {
-            //console.log("BLOCK SEND ", a.byteLength);
             await this.doSend(a);
-            
         }
         this.offset += a.byteLength;
     }
@@ -348,34 +220,6 @@ class ChannelWriter {
         } else {
             await this.sendArrayBuffer(b);
         }
-    }
-}
-
-
-class DataWriter {
-    writable;
-    offset = 0;
-
-    constructor(writable) {
-        this.writable = writable;
-    }
-
-    async writeBlob(b) {
-        console.log("PREBLOB", b.size, this.offset);
-        await this.writable.write(b);
-        this.offset += b.size;
-        console.log("POSTBLOB", b.size, this.offset);
-    }
-
-    async writeBuffer(b) {
-        console.log("PREBUF", b.byteLength, this.offset);
-        await this.writable.write(b);
-        this.offset += b.byteLength;
-        console.log("POSTBUF", b.byteLength, this.offset);
-    }
-
-    async close() {
-        await this.writable.close();
     }
 }
 
@@ -544,14 +388,12 @@ function lfhHeader(entry) {
 
 
 async function onFileReaderData(e) {
-    //sendChannel.send(e.target.result);
     inputFileOffset += e.target.result.byteLength;
     updateInputFileOffsetProgress();
     updateInputTimeProgress();
-    //console.log('PLUGGING AWAY');
     await channelWriter.writeBuffer(e.target.result);
 
-    //sendProgress.value = offset;
+
     if (inputFileOffset < files[inputFileIndex].size) {
         readSlice();
     } else {
@@ -564,7 +406,6 @@ async function onFileReaderData(e) {
         } else {
             console.log('DONE READING ');
             updateInputTimeProgress();
-
             const eocdrStart = channelWriter.offset;
             for (let i = 0; i < zipEntries.length; i++) {
                 const cDir = centralDir(zipEntries[i]);
@@ -576,8 +417,6 @@ async function onFileReaderData(e) {
             await channelWriter.writeBuffer(eocdrHeader);
             await channelWriter.writeBuffer(z64EOCDLocator(eocdr64Offset));
             await channelWriter.writeBuffer(eocd());
-            //dw.close();
-            //await writer.close();
             await channelWriter.writeBuffer(new ArrayBuffer(0));
         }
     }
@@ -611,7 +450,7 @@ function updateInputTimeProgress() {
 }
 
 
-async function processFiles() {    
+async function processFiles() {
     inputFileIndex = 0;
     updateInputFileProgress();
     inputFileOffset = 0;
@@ -622,7 +461,7 @@ async function processFiles() {
     inputFileReader.addEventListener('error', error => console.log('Error reading file:', error));
     inputFileReader.addEventListener('abort', event => console.log('File reading aborted:', event));
     inputFileReader.addEventListener('load', onFileReaderData);
-   
+
     startFile();
     readSlice();
 }
@@ -640,10 +479,10 @@ window.addEventListener('load',
                 console.log('No files selected');
                 return false;
             }
-            
+
             const handle = await window.showSaveFilePicker();
             writer = await handle.createWritable();
-            
+
             await createConnection();
             return false;
         });
