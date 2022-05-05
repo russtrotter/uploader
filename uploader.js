@@ -150,7 +150,7 @@ class Entry {
     size;
     lfhOffset = 0;
     constructor(file) {
-        this.name = new TextEncoder('utf-8').encode(file.name);
+        this.name = new TextEncoder('utf-8').encode(file.webkitRelativePath);
         this.size = BigInt(file.size);
     }
 }
@@ -471,10 +471,16 @@ window.addEventListener('load',
         var b = document.querySelector('#upload');
         inputFileProgress = document.querySelector('#inputFileProgress');
         inputFileOffsetProgress = document.querySelector("#inputFileOffsetProgress");
-        const filesInput = document.querySelector('#files');
+        const filesInput = document.getElementById('files');
         inputTimeProgress = document.querySelector('#inputTimeProgress');
         b.addEventListener('click', async () => {
-            files = filesInput.files;
+            files = [];
+            for (let i = 0; i < filesInput.files.length; i++) {
+                let f = filesInput.files.item(i);
+                if (f.name !== '.DS_Store') {
+                    files.push(f);
+                }
+            }
             if (files.length === 0) {
                 console.log('No files selected');
                 return false;
