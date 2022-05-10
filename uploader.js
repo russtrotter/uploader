@@ -17,18 +17,19 @@ let inputFileReader;
 let inputFileOffset = 0;
 let inputFileIndex = 0;
 let zipEntries = [];
+// Buffering file slice reads greatly improves performance
+// and throughput.  The size of the buffer should take into
+// account desired browser memory footprint and how much back-pressure
+// we'll get downstream.
 const INPUT_FILE_BUF_SIZE = 1024 * 1024 * 5;
-
-
-
-// "offer from ... " negotation says max packet size is 262144 ?
-
 
 async function createConnection() {
     localConnection = new RTCPeerConnection();
     console.log('Created local peer connection object localConnection');
 
     sendChannel = localConnection.createDataChannel('sendDataChannel');
+    // chrome RTCDataChannels currently only support arraybuffer
+    // transport
     sendChannel.binaryType = 'arraybuffer';
 
     console.log('Created send data channel');
@@ -145,19 +146,32 @@ async function onReceiveChannelStateChange(evt) {
     }
 }
 
+// this class represents the minimal info we need for a ZIP file entry
 class Entry {
+    // store the UTF-8 encoded bytes
     name;
+    // size in bytes
     size;
+    // offset in the ZIP data stream for the "Local File Header"
     lfhOffset = 0;
     constructor(file) {
+        // NOTE, the 'webkitRelativePath' field contains the full path of a file
+        // in a directory-based <input> file picker
         this.name = new TextEncoder('utf-8').encode(file.webkitRelativePath);
         this.size = BigInt(file.size);
     }
 }
 
+// this class is the primary interface for producing the ZIP output stream
+// In this demo, we write the ZIP data to a WebRTC RTCDataChannel
 class ChannelWriter {
+    // the ZIP format requires back "references" to various offsets so we'll 
+    // utilize a forward-only seek/offset value that tracks progress in the output
     offset = 0;
     channel;
+    // we'll write at most this many bytes to the data channel as per RTC recommendations
+    // there's probably a way to get this value dynamically from the channel negotation
+    // process.
     chunkSize = 262144;
 
     constructor(dc, lowWaterMark = 262144, highWaterMark = 1048576) {
@@ -166,6 +180,11 @@ class ChannelWriter {
 
         this.highWaterMark = highWaterMark;
         this.channel.bufferedAmountLowThreshold = lowWaterMark;
+        // browser fires this message when:
+        //  * the outbound browser buffer size _exceeds_ the low watermark
+        //  * the outbound browser buffer empties enough to where it's _below_ the low watermark
+        // 
+        // thus, it won't fire when the size of the outbound browser buffer is >= 0 or < low watermark
         this.channel.onbufferedamountlow = () => {
             // resume once low watermark is crossed
             if (this.paused) {
@@ -177,6 +196,8 @@ class ChannelWriter {
     }
 
 
+    // this is the base method for sending arraybuffer(s) to the channel where we handle
+    // backpressure.
     async doSend(a) {
         if (this.paused) {
             throw new Error('oh fudge, already paused');
@@ -186,6 +207,9 @@ class ChannelWriter {
             if (!this.paused && this.channel.bufferedAmount < this.highWaterMark) {
                 resolve();
             } else {
+                // getting here means the buffered amount has accumulated over the highwatermark
+                // so we'll pause further sends and let the browser tell us later when
+                // the buffer shrinks back down to the low watermark
                 console.debug('DC paused a=', a.byteLength, 'ba=', this.channel.bufferedAmount);
                 this.paused = true;
                 this.resolve = resolve;
@@ -193,6 +217,7 @@ class ChannelWriter {
         });
     }
 
+    // chunk a larger arraybuffer prior to submission
     async chunkArrayBuffer(a) {
         let off = 0;
         while (off < a.byteLength) {
@@ -203,6 +228,7 @@ class ChannelWriter {
         }
     }
 
+    // primary method to send a single arraybuffer of arbitrary size
     async sendArrayBuffer(a) {
         if (a.byteLength > this.chunkSize) {
             await this.chunkArrayBuffer(a);
@@ -212,6 +238,7 @@ class ChannelWriter {
         this.offset += a.byteLength;
     }
 
+    // helper method to send either a single arraybuffer or an array of them
     async writeBuffer(b) {
         if (b instanceof Array) {
             for (let i = 0; i < b.length; i++) {
@@ -222,6 +249,7 @@ class ChannelWriter {
         }
     }
 }
+
 
 function extraZip64(length, lfhOffset) {
     let sz = 16;
@@ -473,8 +501,10 @@ window.addEventListener('load',
         inputFileOffsetProgress = document.querySelector("#inputFileOffsetProgress");
         const filesInput = document.getElementById('files');
         inputTimeProgress = document.querySelector('#inputTimeProgress');
+        // all action starts from click of the "Upload" button
         b.addEventListener('click', async () => {
             files = [];
+            // strip out those MacOS .DS_Store files from the selected files
             for (let i = 0; i < filesInput.files.length; i++) {
                 let f = filesInput.files.item(i);
                 if (f.name !== '.DS_Store') {
@@ -486,6 +516,7 @@ window.addEventListener('load',
                 return false;
             }
 
+            // present a picker for the destination file
             const handle = await window.showSaveFilePicker();
             writer = await handle.createWritable();
 
